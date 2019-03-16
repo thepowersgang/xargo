@@ -78,27 +78,27 @@ version = "0.0.0"
     for (stage_num, stage) in blueprint.stages {
         let td;
         let tdp;
-		// When configured to do so (in Xargo.toml) use a hard-coded and maintained build directory
+        // When configured to do so (in Xargo.toml) use a hard-coded and maintained build directory
         let td = if blueprint.track_sysroot {
-			let mut tdp_owned = rustlib.parent().join("build");
-			if ! tdp_owned.exists() {
-				util::mkdir(&tdp_owned)?;
-			}
-			tdp_owned.push( format!("stage{}", stage_num) );
-			if ! tdp_owned.exists() {
-				util::mkdir(&tdp_owned)?;
-			}
-			tdp = tdp_owned;
-			&tdp
-		}
-		else {
-			td = TempDir::new("xargo").chain_err(|| "couldn't create a temporary directory")?;
-			if env::var_os("XARGO_KEEP_TEMP").is_some() {
-				tdp = td.into_path();
-				&tdp
-			} else {
-				td.path()
-			}
+            let mut tdp_owned = rustlib.parent().join("build");
+            if ! tdp_owned.exists() {
+                util::mkdir(&tdp_owned)?;
+            }
+            tdp_owned.push( format!("stage{}", stage_num) );
+            if ! tdp_owned.exists() {
+                util::mkdir(&tdp_owned)?;
+            }
+            tdp = tdp_owned;
+            &tdp
+        }
+        else {
+            td = TempDir::new("xargo").chain_err(|| "couldn't create a temporary directory")?;
+            if env::var_os("XARGO_KEEP_TEMP").is_some() {
+                tdp = td.into_path();
+                &tdp
+            } else {
+                td.path()
+            }
         };
 
         let mut stoml = TOML.to_owned();
@@ -117,20 +117,20 @@ version = "0.0.0"
             stoml.push_str(&profile.to_string())
         }
 
-		{
-			let inner_cargo_toml = td.join("Cargo.toml");
-			if ! inner_cargo_toml.exists() {
-				util::write(&inner_cargo_toml, &stoml)?;
-				util::mkdir(&td.join("src"))?;
-				util::write(&td.join("src/lib.rs"), "")?;
-			}
-			else {
-				// already exists? rewrite only if there was a change.
-				if util::read(&inner_cargo_toml).unwrap_or(String::new()) != stoml {
-					util::write(&inner_cargo_toml, &stoml)?;
-				}
-			}
-		}
+        {
+            let inner_cargo_toml = td.join("Cargo.toml");
+            if ! inner_cargo_toml.exists() {
+                util::write(&inner_cargo_toml, &stoml)?;
+                util::mkdir(&td.join("src"))?;
+                util::write(&td.join("src/lib.rs"), "")?;
+            }
+            else {
+                // already exists? rewrite only if there was a change.
+                if util::read(&inner_cargo_toml).unwrap_or(String::new()) != stoml {
+                    util::write(&inner_cargo_toml, &stoml)?;
+                }
+            }
+        }
 
         let stage_options = &stage.stage_options;
         let cargo = || {
@@ -266,7 +266,7 @@ pub fn update(
 
     let hash = hash(cmode, &blueprint, rustflags, &ctoml, meta)?;
 
-	// If the build directory is present in the blueprint, unconditionally try to recompile
+    // If the build directory is present in the blueprint, unconditionally try to recompile
     if blueprint.track_sysroot || old_hash(cmode, home)? != Some(hash) {
         build(
             cmode,
@@ -288,7 +288,7 @@ pub fn update(
     let lock = home.lock_rw(&meta.host)?;
     let hfile = lock.parent().join(".hash");
 
-	// TODO: What if the build did anything?
+    // TODO: What if the build did anything?
     let hash = meta.commit_hash.as_ref().map(|s| &**s).unwrap_or("");
     if hfile.exists() {
         if util::read(&hfile)? == hash {
@@ -348,14 +348,14 @@ impl Default for StageOptions {
 /// A sysroot that will be built in "stages"
 #[derive(Debug)]
 pub struct Blueprint {
-	track_sysroot: bool,
+    track_sysroot: bool,
     stages: BTreeMap<i64, Stage>,
 }
 
 impl Blueprint {
     fn new() -> Self {
         Blueprint {
-			track_sysroot: false,
+            track_sysroot: false,
             stages: BTreeMap::new(),
         }
     }
@@ -422,19 +422,19 @@ impl Blueprint {
         };
 
         let mut blueprint = Blueprint::new();
-		blueprint.track_sysroot = if let Some(v) = toml.and_then(|t| t.track_sysroot()) {
-			if let &Value::Boolean(track_sysroot) = v {
-				 track_sysroot
-			}
-			else {
+        blueprint.track_sysroot = if let Some(v) = toml.and_then(|t| t.track_sysroot()) {
+            if let &Value::Boolean(track_sysroot) = v {
+                 track_sysroot
+            }
+            else {
                 Err(format!(
                     "Xargo.toml: xargo.track-sysroot must be a boolean"
                 ))?
-			}
-		}
-		else {
-			false
-		};
+            }
+        }
+        else {
+            false
+        };
         for (k, v) in deps {
             if let Value::Table(mut map) = v {
                 let stage = if let Some(value) = map.remove("stage") {

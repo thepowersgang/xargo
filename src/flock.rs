@@ -30,8 +30,8 @@ impl FileLock {
     }
 
     pub fn remove_siblings(&self) -> io::Result<()> {
-		self.remove_siblings_exclude(&[])
-	}
+        self.remove_siblings_exclude(&[])
+    }
     pub fn remove_siblings_exclude(&self, exclude: &[&str]) -> io::Result<()> {
         let path = self.path();
         for entry in path.parent().unwrap().read_dir()? {

@@ -114,16 +114,16 @@ impl Toml {
             .lookup(&format!("target.{}.dependencies", target))
     }
 
-	/// Rreturns the `xargo.track-sysroot` option, that controls if the sysroot's build state is maintained and always rebuilt
-	pub fn track_sysroot(&self) -> Option<&Value> {
-		self.table
-			.lookup("xargo.track-sysroot")
-	}
+    /// Rreturns the `xargo.track-sysroot` option, that controls if the sysroot's build state is maintained and always rebuilt
+    pub fn track_sysroot(&self) -> Option<&Value> {
+        self.table
+            .lookup("xargo.track-sysroot")
+    }
 
-	pub fn stage_options(&self, stage_num: i64) -> Option<&Value> {
-		self.table
-			.lookup(&format!("xargo.stage{}", stage_num))
-	}
+    pub fn stage_options(&self, stage_num: i64) -> Option<&Value> {
+        self.table
+            .lookup(&format!("xargo.stage{}", stage_num))
+    }
 }
 
 pub fn toml(root: &Root) -> Result<Option<Toml>> {
