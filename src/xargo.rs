@@ -119,6 +119,11 @@ impl Toml {
 		self.table
 			.lookup("xargo.track-sysroot")
 	}
+
+	pub fn stage_options(&self, stage_num: i64) -> Option<&Value> {
+		self.table
+			.lookup(&format!("xargo.stage{}", stage_num))
+	}
 }
 
 pub fn toml(root: &Root) -> Result<Option<Toml>> {

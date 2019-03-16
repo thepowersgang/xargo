@@ -48,7 +48,7 @@ version = "0.0.0"
 
     let rustlib = home.lock_rw(cmode.triple())?;
     rustlib
-        .remove_siblings_exclude(&["build"])	// exclude the build directory
+        .remove_siblings_exclude(&["build"])    // exclude the build directory
         .chain_err(|| format!("couldn't clear {}", rustlib.path().display()))?;
     let dst = rustlib.parent().join("lib");
     util::mkdir(&dst)?;
@@ -132,10 +132,14 @@ version = "0.0.0"
 			}
 		}
 
+        let stage_options = &stage.stage_options;
         let cargo = || {
             let mut cmd = Command::new("cargo");
             let mut flags = rustflags.for_xargo(home);
-            flags.push_str(" -Z force-unstable-if-unmarked");
+            // Allow a component of sysroot to not have forced unstable (for using custom std impls)
+            if !stage_options.disable_staged_api {
+                flags.push_str(" -Z force-unstable-if-unmarked");
+            }
             if verbose {
                 writeln!(io::stderr(), "+ RUSTFLAGS={:?}", flags).ok();
             }
@@ -327,6 +331,18 @@ pub struct Stage {
     crates: Vec<String>,
     dependencies: Table,
     patch: Option<Table>,
+    stage_options: StageOptions,
+}
+#[derive(Debug)]
+pub struct StageOptions {
+    disable_staged_api: bool,
+}
+impl Default for StageOptions {
+    fn default() -> Self {
+        StageOptions {
+            disable_staged_api: false,
+        }
+    }
 }
 
 /// A sysroot that will be built in "stages"
@@ -463,6 +479,22 @@ impl Blueprint {
             }
         }
 
+        for (&stage_num, stage_info) in &mut blueprint.stages {
+            if let Some(value) = toml.and_then(|t| t.stage_options(stage_num))
+            {
+                let stage_options = value
+                    .as_table()
+                    .ok_or_else(|| format!("Xargo.toml: `xargo.stage{}` must be a table", stage_num))
+                    ?;
+                stage_info.stage_options.disable_staged_api = if let Some(v) = stage_options.get("disable-staged-api") {
+                        v.as_bool().ok_or_else(|| format!("Xargo.toml: `xargo.stage{}` must be a boolean", stage_num))?
+                    }
+                    else {
+                        false
+                    };
+            }
+        }
+
         Ok(blueprint)
     }
 
@@ -490,7 +522,8 @@ impl Blueprint {
                     // an old rustc, doesn't need a rustc_std_workspace_core
                     None
                 }
-            }
+            },
+            stage_options: Default::default(),
         });
 
         stage.dependencies.insert(krate.clone(), Value::Table(toml));
