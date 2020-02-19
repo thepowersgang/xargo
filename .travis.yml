@@ -8,20 +8,30 @@ matrix:
     # Tests
     - env: TARGET=x86_64-unknown-linux-gnu
       rust: nightly
+      if: branch = staging OR branch = trying OR type = pull_request
     - env: TARGET=x86_64-unknown-linux-gnu
-      rust: nightly-2018-12-01
+      # Don't remove this target; test coverage in `smoke.rs` relies on us running at least
+      # one pinned toolchain.
+      rust: nightly-2018-12-01 # old version without rustc-std-workspace-core
+      if: branch = staging OR branch = trying
 
     # Linux (build only)
     - env: TARGET=i686-unknown-linux-gnu
+      if: branch = staging OR branch = trying
     - env: TARGET=i686-unknown-linux-musl
+      if: branch = staging OR branch = trying
     - env: TARGET=x86_64-unknown-linux-gnu
+      if: branch = staging OR branch = trying
     - env: TARGET=x86_64-unknown-linux-musl
+      if: branch = staging OR branch = trying
 
     # OSX (build only)
     - env: TARGET=i686-apple-darwin
       os: osx
+      if: branch = staging OR branch = trying
     - env: TARGET=x86_64-apple-darwin
       os: osx
+      if: branch = staging OR branch = trying
 
 install:
   - bash ci/install.sh
@@ -52,6 +62,7 @@ branches:
     - /^v\d+\.\d+\.\d+.*$/
     - staging
     - trying
+    - master
 
 notifications:
   email:

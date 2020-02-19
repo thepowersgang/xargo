@@ -2,8 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
-use std::path::PathBuf;
-use std::process::Command;
+use std::path::{Path, PathBuf};
 use std::{env, fs};
 
 use rustc_version::VersionMeta;
@@ -32,12 +31,15 @@ fn profile() -> &'static str {
 fn build(
     cmode: &CompilationMode,
     blueprint: Blueprint,
-    ctoml: &cargo::Toml,
+    ctoml: &Option<cargo::Toml>,
     home: &Home,
     rustflags: &Rustflags,
+    src: &Src,
     sysroot: &Sysroot,
     hash: u64,
     verbose: bool,
+    message_format: Option<&str>,
+    cargo_mode: XargoMode,
 ) -> Result<()> {
     const TOML: &'static str = r#"
 [package]
@@ -106,16 +108,28 @@ version = "0.0.0"
             let mut map = Table::new();
 
             map.insert("dependencies".to_owned(), Value::Table(stage.dependencies));
-            if let Some(patch) = stage.patch {
-                map.insert("patch".to_owned(), Value::Table(patch));
-            }
+            map.insert("patch".to_owned(), Value::Table(stage.patch));
 
             stoml.push_str(&Value::Table(map).to_string());
         }
 
-        if let Some(profile) = ctoml.profile() {
-            stoml.push_str(&profile.to_string())
+        if let Some(ctoml) = ctoml {
+            if let Some(profile) = ctoml.profile() {
+                stoml.push_str(&profile.to_string())
+            }
         }
+
+        // rust-src comes with a lockfile for libstd. Use it.
+        let lockfile = src.path().join("..").join("Cargo.lock");
+        let target_lockfile = td.join("Cargo.lock");
+        fs::copy(lockfile, &target_lockfile).chain_err(|| "Cargo.lock file is missing from source dir")?;
+
+        let mut perms = fs::metadata(&target_lockfile)
+            .chain_err(|| "Cargo.lock file is missing from target dir")?
+            .permissions();
+        perms.set_readonly(false);
+        fs::set_permissions(&target_lockfile, perms)
+            .chain_err(|| "Cargo.lock file is missing from target dir")?;
 
         {
             let inner_cargo_toml = td.join("Cargo.toml");
@@ -134,7 +148,7 @@ version = "0.0.0"
 
         let stage_options = &stage.stage_options;
         let cargo = || {
-            let mut cmd = Command::new("cargo");
+            let mut cmd = cargo::command();
             let mut flags = rustflags.for_xargo(home);
             // Allow a component of sysroot to not have forced unstable (for using custom std impls)
             if !stage_options.disable_staged_api {
@@ -145,6 +159,30 @@ version = "0.0.0"
             }
             cmd.env("RUSTFLAGS", flags);
             cmd.env_remove("CARGO_TARGET_DIR");
+
+            // Workaround #261.
+            //
+            // If a crate is shared between the sysroot and a binary, we might
+            // end up with conflicting symbols. This is because both versions
+            // of the crate would get linked, and their metadata hash would be
+            // exactly the same.
+            //
+            // To avoid this, we need to inject some data that modifies the
+            // metadata hash. Fortunately, cargo already has a mechanism for
+            // this, the __CARGO_DEFAULT_LIB_METADATA environment variable.
+            // Unsurprisingly, rust's bootstrap (which has basically the same
+            // role as xargo of building the libstd) makes use of this
+            // environment variable to avoid exactly this problem. See here:
+            // https://github.com/rust-lang/rust/blob/73369f32621f6a844a80a8513ae3ded901e4a406/src/bootstrap/builder.rs#L876
+            //
+            // This relies on an **unstable cargo feature** that isn't meant to
+            // be used outside the bootstrap. This is explicitly stated in
+            // cargo's source:
+            // https://github.com/rust-lang/cargo/blob/14654f38d0819c47d7a605d6f1797ffbcdc65000/src/cargo/core/compiler/context/compilation_files.rs#L496
+            // Unfortunately, I don't see any other way out. We need to have a
+            // way to modify the crate's hash, and from the outside this is the
+            // only way to do so.
+            cmd.env("__CARGO_DEFAULT_LIB_METADATA", "xargo");
 
             // As of rust-lang/cargo#4788 Cargo invokes rustc with a changed "current directory" so
             // we can't assume that such directory will be the same as the directory from which
@@ -161,7 +199,10 @@ version = "0.0.0"
                 }
             }
 
-            cmd.arg("build");
+            match cargo_mode {
+                XargoMode::Build => cmd.arg("build"),
+                XargoMode::Check => cmd.arg("check")
+            };
 
             match () {
                 #[cfg(feature = "dev")]
@@ -174,6 +215,9 @@ version = "0.0.0"
             cmd.arg("--manifest-path");
             cmd.arg(td.join("Cargo.toml"));
             cmd.args(&["--target", cmode.triple()]);
+            if let Some(format) = message_format {
+                cmd.args(&["--message-format", format]);
+            }
 
             if verbose {
                 cmd.arg("-v");
@@ -227,7 +271,7 @@ fn hash(
     cmode: &CompilationMode,
     blueprint: &Blueprint,
     rustflags: &Rustflags,
-    ctoml: &cargo::Toml,
+    ctoml: &Option<cargo::Toml>,
     meta: &VersionMeta,
 ) -> Result<u64> {
     let mut hasher = DefaultHasher::new();
@@ -238,8 +282,10 @@ fn hash(
 
     cmode.hash(&mut hasher)?;
 
-    if let Some(profile) = ctoml.profile() {
-        profile.hash(&mut hasher);
+    if let Some(ctoml) = ctoml {
+        if let Some(profile) = ctoml.profile() {
+            profile.hash(&mut hasher);
+        }
     }
 
     if let Some(ref hash) = meta.commit_hash {
@@ -258,11 +304,29 @@ pub fn update(
     src: &Src,
     sysroot: &Sysroot,
     verbose: bool,
+    message_format: Option<&str>,
+    cargo_mode: XargoMode,
 ) -> Result<()> {
-    let ctoml = cargo::toml(root)?;
-    let xtoml = xargo::toml(root)?;
+    let ctoml = match cargo_mode {
+        XargoMode::Build => Some(cargo::toml(root)?),
+        XargoMode::Check => {
+            if root.path().join("Cargo.toml").exists() {
+                Some(cargo::toml(root)?)
+            } else {
+                None
+            }
+        }
+    };
 
-    let blueprint = Blueprint::from(xtoml.as_ref(), cmode.triple(), root, &src)?;
+    let (xtoml_parent, xtoml) = xargo::toml(root)?;
+
+    // As paths in the 'Xargo.toml' can be relative to the directory containing
+    // the 'Xargo.toml', we need to pass the path containing it to the
+    // Blueprint. Otherwise, if no 'Xargo.toml' is found, we use the regular
+    // root path.
+    let base_path: &Path = xtoml_parent.unwrap_or_else(|| root.path());
+
+    let blueprint = Blueprint::from(xtoml.as_ref(), cmode.triple(), &base_path, &src)?;
 
     let hash = hash(cmode, &blueprint, rustflags, &ctoml, meta)?;
 
@@ -274,9 +338,12 @@ pub fn update(
             &ctoml,
             home,
             rustflags,
+            src,
             sysroot,
             hash,
             verbose,
+            message_format,
+            cargo_mode,
         )?;
     }
 
@@ -309,16 +376,13 @@ pub fn update(
         &dst,
     )?;
 
-    let bin_dst = lock.parent().join("bin");
-    util::mkdir(&bin_dst)?;
-    util::cp_r(
-        &sysroot
-            .path()
-            .join("lib/rustlib")
-            .join(&meta.host)
-            .join("bin"),
-        &bin_dst,
-    )?;
+    let bin_src = sysroot.path().join("lib/rustlib").join(&meta.host).join("bin");
+    // copy the Rust linker if it exists
+    if bin_src.exists() {
+        let bin_dst = lock.parent().join("bin");
+        util::mkdir(&bin_dst)?;
+        util::cp_r(&bin_src, &bin_dst)?;
+    }
 
     util::write(&hfile, hash)?;
 
@@ -330,7 +394,7 @@ pub fn update(
 pub struct Stage {
     crates: Vec<String>,
     dependencies: Table,
-    patch: Option<Table>,
+    patch: Table,
     stage_options: StageOptions,
 }
 #[derive(Debug)]
@@ -345,11 +409,43 @@ impl Default for StageOptions {
     }
 }
 
+/// Which mode to invoke `cargo` in when building the sysroot
+/// Can be either `cargo build` or `cargo check`
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum XargoMode {
+    Build,
+    Check,
+}
+
 /// A sysroot that will be built in "stages"
 #[derive(Debug)]
 pub struct Blueprint {
     track_sysroot: bool,
     stages: BTreeMap<i64, Stage>,
+}
+
+trait AsTableMut {
+    fn as_table_mut<F, R>(&mut self, on_error_path: F) -> Result<&mut Table>
+    where
+        F: FnOnce() -> R,
+        R: ::std::fmt::Display;
+}
+
+impl AsTableMut for Value {
+    /// If the `self` is a Value::Table, return `Ok` with mutable reference to
+    /// the contained table. If it's not return `Err` with an error message.
+    /// The result of `on_error_path` will be inserted in the error message and
+    /// should indicate the TOML path of `self`.
+    fn as_table_mut<F, R>(&mut self, on_error_path: F) -> Result<&mut Table>
+    where
+        F: FnOnce() -> R,
+        R: ::std::fmt::Display,
+    {
+        match self {
+            Value::Table(table) => Ok(table),
+            _ => Err(format!("Xargo.toml: `{}` must be a table", on_error_path()).into()),
+        }
+    }
 }
 
 impl Blueprint {
@@ -360,7 +456,79 @@ impl Blueprint {
         }
     }
 
-    fn from(toml: Option<&xargo::Toml>, target: &str, root: &Root, src: &Src) -> Result<Self> {
+    /// Add $CRATE to `patch` section, as needed to build libstd.
+    fn add_patch(patch: &mut Table, mut path: PathBuf, crate_: &str) -> Result<()> {
+        path.push(crate_);
+        if path.exists() {
+            // add crate to patch section (if not specified)
+            fn table_entry<'a>(table: &'a mut Table, key: &str) -> Result<&'a mut Table> {
+                table
+                    .entry(key.into())
+                    .or_insert_with(|| Value::Table(Table::new()))
+                    .as_table_mut(|| key)
+            }
+
+            let crates_io = table_entry(patch, "crates-io")?;
+            if !crates_io.contains_key(crate_) {
+                table_entry(crates_io, crate_)?
+                    .insert("path".into(), Value::String(path.display().to_string()));
+            }
+        }
+        Ok(())
+    }
+
+    fn from(toml: Option<&xargo::Toml>, target: &str, base_path: &Path, src: &Src) -> Result<Self> {
+        fn make_path_absolute<F, R>(
+            crate_spec: &mut toml::Table,
+            base_path: &Path,
+            on_error_path: F,
+        ) -> Result<()>
+        where
+            F: FnOnce() -> R,
+            R: ::std::fmt::Display,
+        {
+            if let Some(path) = crate_spec.get_mut("path") {
+                let p = PathBuf::from(
+                    path.as_str()
+                        .ok_or_else(|| format!("`{}.path` must be a string", on_error_path()))?,
+                );
+
+                if !p.is_absolute() {
+                    *path = Value::String(
+                        base_path
+                            .join(&p)
+                            .canonicalize()
+                            .chain_err(|| format!("couldn't canonicalize {}", p.display()))?
+                            .display()
+                            .to_string(),
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        // Compose patch section
+        let mut patch = match toml.and_then(xargo::Toml::patch) {
+            Some(value) => value
+                .as_table()
+                .cloned()
+                .ok_or_else(|| format!("Xargo.toml: `patch` must be a table"))?,
+            None => Table::new()
+        };
+
+        for (k1, v) in patch.iter_mut() {
+            for (k2, v) in v.as_table_mut(|| format!("patch.{}", k1))?.iter_mut() {
+                let krate = v.as_table_mut(|| format!("patch.{}.{}", k1, k2))?;
+
+                make_path_absolute(krate, base_path, || format!("patch.{}.{}", k1, k2))?;
+            }
+        }
+
+        Blueprint::add_patch(&mut patch, src.path().join("tools"), "rustc-std-workspace-core")?;
+        Blueprint::add_patch(&mut patch, src.path().join("tools"), "rustc-std-workspace-alloc")?;
+        Blueprint::add_patch(&mut patch, src.path().join("tools"), "rustc-std-workspace-std")?;
+
+        // Compose dependency sections
         let deps = match (
             toml.and_then(|t| t.dependencies()),
             toml.and_then(|t| t.target_dependencies(target)),
@@ -445,21 +613,7 @@ impl Blueprint {
                     0
                 };
 
-                if let Some(path) = map.get_mut("path") {
-                    let p = PathBuf::from(path.as_str()
-                        .ok_or_else(|| format!("dependencies.{}.path must be a string", k))?);
-
-                    if !p.is_absolute() {
-                        *path = Value::String(
-                            root.path()
-                                .join(&p)
-                                .canonicalize()
-                                .chain_err(|| format!("couldn't canonicalize {}", p.display()))?
-                                .display()
-                                .to_string(),
-                        );
-                    }
-                }
+                make_path_absolute(&mut map, base_path, || format!("dependencies.{}", k))?;
 
                 if !map.contains_key("path") && !map.contains_key("git") {
                     // No path and no git given.  This might be in the sysroot, but if we don't find it there we assume it comes from crates.io.
@@ -469,7 +623,7 @@ impl Blueprint {
                     }
                 }
 
-                blueprint.push(stage, k, map, src);
+                blueprint.push(stage, k, map, &patch);
             } else {
                 Err(format!(
                     "Xargo.toml: target.{}.dependencies.{} must be \
@@ -498,32 +652,12 @@ impl Blueprint {
         Ok(blueprint)
     }
 
-    fn push(&mut self, stage: i64, krate: String, toml: Table, src: &Src) {
+    fn push(&mut self, stage: i64, krate: String, toml: Table, patch: &Table) {
         let stage = self.stages.entry(stage).or_insert_with(|| Stage {
             crates: vec![],
             dependencies: Table::new(),
-            patch: {
-                let rustc_std_workspace_core = src.path().join("tools/rustc-std-workspace-core");
-                if rustc_std_workspace_core.exists() {
-                    // For a new stage, we also need to compute the patch section of the toml
-                    fn make_singleton_map(key: &str, val: Value) -> Table {
-                        let mut map = Table::new();
-                        map.insert(key.to_owned(), val);
-                        map
-                    }
-                    Some(make_singleton_map("crates-io", Value::Table(
-                        make_singleton_map("rustc-std-workspace-core", Value::Table(
-                            make_singleton_map("path", Value::String(
-                                rustc_std_workspace_core.display().to_string()
-                            ))
-                        ))
-                    )))
-                } else {
-                    // an old rustc, doesn't need a rustc_std_workspace_core
-                    None
-                }
-            },
             stage_options: Default::default(),
+            patch: patch.clone(),
         });
 
         stage.dependencies.insert(krate.clone(), Value::Table(toml));

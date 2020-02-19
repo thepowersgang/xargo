@@ -36,10 +36,6 @@ panic=abort`, for your target.
 $ cargo install xargo
 ```
 
-But we also have [binary releases] for the three major OSes.
-
-[binary releases]: https://github.com/japaric/xargo/releases
-
 ## Usage
 
 ### `no_std`
@@ -312,6 +308,18 @@ stage = 1
 git = "https://github.com/japaric/steed"
 stage = 2
 ```
+
+## Check-only sysroot build
+
+Xargo supports performing a 'check build' of the syroot
+via the `xargo-check` command. This command is invoked exactly
+like `xargo`, but will invoke `cargo check` instead of `cargo build`
+when building the sysroot.
+
+This is only useful for very specialized applicationsm like Miri.
+The resulting libstd will *not* be useable in a normal build, since codegen
+will not be performed. You should almost always run `xargo check` (note the space),
+which will perform a normal sysroot build, followed by a 'check' build of *your application*
 
 ## Caveats / gotchas
 

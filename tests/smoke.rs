@@ -121,6 +121,14 @@ fn xargo() -> Result<Command> {
     Ok(Command::new(p))
 }
 
+fn xargo_check() -> Result<Command> {
+    let mut p = env::current_exe().chain_err(|| "couldn't get path to current executable")?;
+    p.pop();
+    p.pop();
+    p.push("xargo-check");
+    Ok(Command::new(p))
+}
+
 trait CommandExt {
     fn run(&mut self) -> Result<()>;
     fn run_and_get_stderr(&mut self) -> Result<String>;
@@ -146,10 +154,16 @@ impl CommandExt for Command {
         let out = self.output()
             .chain_err(|| format!("couldn't execute `{:?}`", self))?;
 
+        let stderr = String::from_utf8(out.stderr)
+            .chain_err(|| format!("`{:?}` output was not UTF-8", self));
+
         if out.status.success() {
-            Ok(String::from_utf8(out.stderr)
-                .chain_err(|| format!("`{:?}` output was not UTF-8", self))?)
+            stderr
         } else {
+            match stderr {
+                Ok(e) => print!("{}", e),
+                Err(e) => print!("{}", e),
+            }
             Err(format!(
                 "`{:?}` failed with exit code: {:?}",
                 self,
@@ -164,8 +178,26 @@ struct Project {
     td: TempDir,
 }
 
+/// Create a simple project
+fn create_simple_project(project_path: &Path, name: &'static str, library_source: &'static str) -> Result<()> {
+    xargo()?
+        .args(&["init", "-q", "--lib", "--vcs", "none", "--name", name])
+        .current_dir(project_path)
+        .run()?;
+
+   write(&project_path.join("src/lib.rs"), false, library_source)?;
+
+   Ok(())
+}
+
 impl Project {
+    /// Creates a new project with given name in a temporary directory.
     fn new(name: &'static str) -> Result<Self> {
+        Self::new_in(std::env::temp_dir(), name)
+    }
+
+    /// Creates a new project with given name in a sub directory of `dir`.
+    fn new_in(dir: PathBuf, name: &'static str) -> Result<Self> {
         const JSON: &'static str = r#"
 {
     "arch": "arm",
@@ -180,15 +212,9 @@ impl Project {
 }
 "#;
 
-        let td = TempDir::new("xargo").chain_err(|| "couldn't create a temporary directory")?;
+        let td = TempDir::new_in(dir, "xargo").chain_err(|| "couldn't create a temporary directory")?;
 
-        xargo()?
-            .args(&["init", "--lib", "--vcs", "none", "--name", name])
-            .current_dir(td.path())
-            .run()?;
-
-        write(&td.path().join("src/lib.rs"), false, "#![no_std]")?;
-
+        create_simple_project(td.path(), name, "#![no_std]")?;
         write(&td.path().join(format!("{}.json", name)), false, JSON)?;
 
         Ok(Project { name: name, td: td })
@@ -196,10 +222,9 @@ impl Project {
 
     /// Calls `xargo build`
     fn build(&self, target: &str) -> Result<()> {
-        xargo()?
-            .args(&["build", "--target", target])
-            .current_dir(self.td.path())
-            .run()
+        // Be less verbose
+        self.build_and_get_stderr(Some(target))?;
+        Ok(())
     }
 
     /// Calls `xargo build` and collects STDERR
@@ -233,8 +258,10 @@ impl Project {
         xargo()?
             .args(&["doc", "--target", target])
             .current_dir(self.td.path())
-            .run()
+            .run_and_get_stderr()?;
+        Ok(())
     }
+
 
     /// Adds a `Xargo.toml` to the project
     fn xargo_toml(&self, toml: &str) -> Result<()> {
@@ -266,7 +293,8 @@ struct HProject {
 
 impl HProject {
     fn new(test: bool) -> Result<Self> {
-        // There can only be one instance of this type at any point in time
+        // There can only be one instance of this type at any point in time.
+        // Needed to make sure we don't try to build multiple HOST libstds in parallel.
         lazy_static! {
             static ref ONCE: Mutex<()> = Mutex::new(());
         }
@@ -276,7 +304,7 @@ impl HProject {
         let td = TempDir::new("xargo").chain_err(|| "couldn't create a temporary directory")?;
 
         xargo()?
-            .args(&["init", "--lib", "--vcs", "none", "--name", "host"])
+            .args(&["init", "-q", "--lib", "--vcs", "none", "--name", "host"])
             .current_dir(td.path())
             .run()?;
 
@@ -284,7 +312,7 @@ impl HProject {
             write(
                 &td.path().join("src/lib.rs"),
                 false,
-                "#![feature(alloc_system)]\nextern crate alloc_system;",
+                "fn _f(_: Vec<std::fs::File>) {}",
             )?;
         } else {
             write(&td.path().join("src/lib.rs"), false, "#![no_std]")?;
@@ -295,6 +323,12 @@ impl HProject {
             host: host(),
             td: td,
         })
+    }
+
+    fn build(&self, verb: &str) -> Result<()> {
+        // Calling "run_and_get_stderr" to be less verbose
+        xargo()?.arg(verb).current_dir(self.td.path()).run_and_get_stderr()?;
+        Ok(())
     }
 
     /// Calls `xargo build` and collects STDERR
@@ -311,6 +345,18 @@ impl HProject {
     fn xargo_toml(&self, toml: &str) -> Result<()> {
         write(&self.td.path().join("Xargo.toml"), false, toml)
     }
+
+    /// Runs `xargo-check` with the specified subcommand
+    fn xargo_check_subcommand(&self, subcommand: Option<&str>) -> Result<String> {
+        let mut cmd = xargo_check()?;
+        if let Some(subcommand) = subcommand {
+            cmd.args(&[subcommand]);
+        }
+        cmd
+            .current_dir(self.td.path())
+            .run_and_get_stderr()
+    }
+
 }
 
 impl Drop for HProject {
@@ -337,24 +383,35 @@ fn simple() {
 }
 
 /// Test building a dependency specified as `target.{}.dependencies` in
-/// Xargo.toml
+/// ../Xargo.toml
 #[cfg(feature = "dev")]
 #[test]
 fn target_dependencies() {
     fn run() -> Result<()> {
         // need this exact target name to get the right gcc flags
         const TARGET: &'static str = "thumbv7m-none-eabi";
+        const STAGE1: &'static str = "stage1";
 
-        let project = Project::new(TARGET)?;
-        project.xargo_toml(
+        let td = TempDir::new("xargo").chain_err(|| "couldn't create a temporary directory")?;
+        let project = Project::new_in(td.path().to_path_buf(), TARGET)?;
+
+        let stage1_path = td.path().join(STAGE1);
+
+        mkdir(stage1_path.as_path())?;
+        create_simple_project(stage1_path.as_path(), STAGE1, "#![no_std]")?;
+        write(&td.path().join("Xargo.toml"), false,
             r#"
 [target.thumbv7m-none-eabi.dependencies.alloc]
+
+[target.thumbv7m-none-eabi.dependencies.stage1]
+stage = 1
+path = "stage1"
 "#,
         )?;
         project.build(TARGET)?;
         assert!(exists("core", TARGET)?);
         assert!(exists("alloc", TARGET)?);
-
+        assert!(exists("stage1", TARGET)?);
         Ok(())
     }
 
@@ -554,8 +611,9 @@ rustflags = ["--cfg", "xargo"]
         assert!(
             stderr
                 .lines()
-                .filter(|l| !l.starts_with("+") && l.contains("rustc"))
-                .all(|l| l.contains("--cfg") && l.contains("xargo"))
+                .filter(|l| !l.starts_with("+") && l.contains("rustc") && !l.contains("rustc-std-workspace"))
+                .all(|l| l.contains("--cfg") && l.contains("xargo")),
+            "unexpected stderr:\n{}", stderr
         );
 
         Ok(())
@@ -754,17 +812,17 @@ fn host_twice() {
 }
 
 /// Check multi stage sysroot builds with `xargo test`
-// We avoid Windows here just because it would be tricky to modify the rust-src
-// component (cf. #36501) from within the appveyor environment
 #[cfg(feature = "dev")]
-#[cfg(not(windows))]
-#[ignore]
 #[test]
-fn test() {
+fn host_libtest() {
     fn run() -> Result<()> {
         let project = HProject::new(true)?;
 
-        project.xargo_toml(
+        if std::env::var("TRAVIS_RUST_VERSION").ok().map_or(false,
+            |var| var.starts_with("nightly-"))
+        {
+            // Testing an old version on CI, we need a different Xargo.toml.
+            project.xargo_toml(
             "
 [dependencies.std]
 features = [\"panic_unwind\"]
@@ -772,20 +830,28 @@ features = [\"panic_unwind\"]
 [dependencies.test]
 stage = 1
 ",
-        )?;
+            )?;
+        } else {
+            project.xargo_toml(
+                "
+[dependencies.std]
+features = [\"panic_unwind\"]
 
-        xargo()?.arg("test").current_dir(project.td.path()).run()?;
+[dependencies.test]
+",
+            )?;
+        }
 
-        Ok(())
+        project.build("test")
     }
 
     run!()
 }
 
-/// Check multi stage sysroot builds with `xargo test`
+/// Check multi stage sysroot builds with `xargo build`
 #[cfg(feature = "dev")]
 #[test]
-fn alloc() {
+fn host_liballoc() {
     fn run() -> Result<()> {
         let project = HProject::new(false)?;
 
@@ -799,10 +865,76 @@ stage = 1
 ",
         )?;
 
-        xargo()?.arg("build").current_dir(project.td.path()).run()?;
+        project.build("build")
+    }
+
+    run!()
+}
+
+/// Test having a `[patch]` section.
+/// The tag in the toml file needs to be updated any time the version of
+/// cc used by rustc is updated.
+#[cfg(feature = "dev")]
+#[test]
+fn host_patch() {
+    fn run() -> Result<()> {
+        let project = HProject::new(false)?;
+        project.xargo_toml(
+            r#"
+[dependencies.std]
+features = ["panic_unwind"]
+
+[patch.crates-io.cc]
+git = "https://github.com/alexcrichton/cc-rs"
+tag = "1.0.25"
+"#,
+        )?;
+        let stderr = project.build_and_get_stderr()?;
+
+        assert!(stderr
+            .lines()
+            .any(|line| line.contains("Compiling cc ")
+                && line.contains("https://github.com/alexcrichton/cc-rs")),
+            "Looks like patching did not work. stderr:\n{}", stderr
+        );
 
         Ok(())
     }
 
+    // Only run this on pinned nightlies, to avoid having to update the version number all the time.
+    let is_pinned = std::env::var("TRAVIS_RUST_VERSION").ok().map_or(false,
+            |var| var.starts_with("nightly-"));
+    if is_pinned {
+        run!()
+    }
+}
+
+#[cfg(feature = "dev")]
+#[test]
+fn cargo_check_check() {
+    fn run() -> Result<()> {
+        let project = HProject::new(false)?;
+        project.xargo_check_subcommand(Some("check"))?;
+
+        Ok(())
+    }
+    run!()
+}
+
+#[cfg(feature = "dev")]
+#[test]
+fn cargo_check_check_no_ctoml() {
+    fn run() -> Result<()> {
+        let project = HProject::new(false)?;
+        // Make sure that 'Xargo.toml` exists
+        project.xargo_toml("")?;
+        std::fs::remove_file(project.td.path().join("Cargo.toml"))
+            .chain_err(|| format!("Could not remove Cargo.toml"))?;
+
+        let stderr = project.xargo_check_subcommand(None)?;
+        assert!(stderr.contains("Checking core"));
+
+        Ok(())
+    }
     run!()
 }

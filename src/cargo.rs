@@ -10,6 +10,7 @@ use cli::Args;
 use errors::*;
 use extensions::CommandExt;
 use util;
+use sysroot::XargoMode;
 use xargo::Home;
 
 pub struct Rustflags {
@@ -142,8 +143,14 @@ fn flags(config: Option<&Config>, target: &str, tool: &str) -> Result<Vec<String
     }
 }
 
+pub fn command() -> Command {
+    env::var_os("CARGO")
+        .map(Command::new)
+        .unwrap_or_else(|| Command::new("cargo"))
+}
+
 pub fn run(args: &Args, verbose: bool) -> Result<ExitStatus> {
-    Command::new("cargo")
+    command()
         .args(args.all())
         .run_and_get_status(verbose)
 }
@@ -241,10 +248,15 @@ impl Root {
     }
 }
 
-pub fn root() -> Result<Option<Root>> {
+pub fn root(mode: XargoMode) -> Result<Option<Root>> {
+    // Don't require a 'Cargo.toml' to exist when 'xargo-check' is used
+    let name = match mode {
+        XargoMode::Build => "Cargo.toml",
+        XargoMode::Check => "Xargo.toml"
+    };
     let cd = env::current_dir().chain_err(|| "couldn't get the current directory")?;
 
-    Ok(util::search(&cd, "Cargo.toml").map(|p| Root { path: p.to_owned() }))
+    Ok(util::search(&cd, name).map(|p| Root { path: p.to_owned() }))
 }
 
 #[derive(Clone, Copy, PartialEq)]

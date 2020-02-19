@@ -1,5 +1,5 @@
-use std::path::{Display, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::path::{Display, Path, PathBuf};
+use std::process::ExitStatus;
 use std::{env, mem};
 use std::io::{self, Write};
 
@@ -23,7 +23,7 @@ pub fn run(
     config: Option<&Config>,
     verbose: bool,
 ) -> Result<ExitStatus> {
-    let mut cmd = Command::new("cargo");
+    let mut cmd = cargo::command();
     cmd.args(args.all());
 
     if args.subcommand() == Some(Subcommand::Doc) {
@@ -124,14 +124,20 @@ impl Toml {
         self.table
             .lookup(&format!("xargo.stage{}", stage_num))
     }
+
+    /// Returns the `patch` part of `Xargo.toml`
+    pub fn patch(&self) -> Option<&Value> {
+        self.table.lookup("patch")
+    }
 }
 
-pub fn toml(root: &Root) -> Result<Option<Toml>> {
-    let p = root.path().join("Xargo.toml");
-
-    if p.exists() {
-        util::parse(&p).map(|t| Some(Toml { table: t }))
-    } else {
-        Ok(None)
+/// Returns the closest directory containing a 'Xargo.toml' and the parsed
+/// content of this 'Xargo.toml'
+pub fn toml(root: &Root) -> Result<(Option<&Path>, Option<Toml>)> {
+    if let Some(p) = util::search(root.path(), "Xargo.toml") {
+        Ok((Some(p), util::parse(&p.join("Xargo.toml")).map(|t| Some(Toml { table: t }))?))
+    }
+    else {
+        Ok((None, None))
     }
 }

@@ -3,7 +3,68 @@
 All notable changes to this project will be documented in this file.
 This project adheres to [Semantic Versioning](http://semver.org/).
 
-## [Unreleased]
+## [v0.3.19] - 2019-12-31
+
+### Added
+
+- Added a `xargo-check` binary that can be used for check-only builds of libstd
+  (thanks to @Aaron1011).
+
+## [v0.3.18] - 2019-12-08
+
+### Added
+
+- Xargo now forces metadata for sysroot crates to be different from "normal"
+  crates to avoid issues with custom sysroots that share crates with the
+  project (thanks to @roblabla).
+
+### Fixed
+
+- Build could fail when the rust-src directory was read-only
+  (thanks to @leo60228).
+
+## [v0.3.17] - 2019-11-08
+
+### Added
+
+- Xargo now honors the `Cargo.lock` file shipped in the `rust-src` component, to
+  make builds reproducible even when new versions of libraries are released on
+  `crates.io`.
+- Xargo now searches for the `Xargo.toml` file in parent directories as well,
+  not just in the current directory (thanks to @Nils-TUD and @Thog).
+
+### Fixed
+
+- The `--message-format` was only forwarded to the project build, not the
+  sysroot build (thanks to @roblabla).
+
+## [v0.3.16] - 2019-08-26
+
+### Fixed
+
+- Xargo now works again with recent nightlies.
+
+## [v0.3.15] - 2019-08-08
+
+### Added
+
+- The cargo binary used by Xargo can be overwritten using the `CARGO` environment variable.
+  (The same was already possible for rustc before, using `RUSTC`.)
+
+### Fixed
+
+- Xargo now works again with recent nightlies.
+
+## [v0.3.14] - 2019-05-09
+
+### Fixed
+
+- Xargo now works again with recent nightlies.
+- Fixed Xargo for targets that do not have a `bin` directory in their rustlib folder.
+
+### Added
+
+- Allow specifying `[patch]` section in `Xargo.toml`.
 
 ## [v0.3.13] - 2018-12-18
 
@@ -334,7 +395,9 @@ stage = 1
 
 - Initial release
 
-[Unreleased]: https://github.com/japaric/xargo/compare/v0.3.13...HEAD
+[Unreleased]: https://github.com/japaric/xargo/compare/v0.3.15...HEAD
+[v0.3.15]: https://github.com/japaric/xargo/compare/v0.3.14...v0.3.15
+[v0.3.14]: https://github.com/japaric/xargo/compare/v0.3.13...v0.3.14
 [v0.3.13]: https://github.com/japaric/xargo/compare/v0.3.12...v0.3.13
 [v0.3.12]: https://github.com/japaric/xargo/compare/v0.3.11...v0.3.12
 [v0.3.11]: https://github.com/japaric/xargo/compare/v0.3.10...v0.3.11
